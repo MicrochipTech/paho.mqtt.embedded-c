@@ -16,6 +16,9 @@
  *   Ian Craggs - add ability to set message handler separately #6
  *******************************************************************************/
 #include "MQTTClient.h"
+#include <stdlib.h>
+#include <string.h>
+#include "definitions.h"
 
 static void NewMessageData(MessageData* md, MQTTString* aTopicName, MQTTMessage* aMessage) {
     md->topicName = aTopicName;
@@ -42,11 +45,15 @@ static int sendPacket(MQTTClient* c, int length, Timer* timer)
     }
     if (sent == length)
     {
+        SYS_APPDEBUG_INFO_PRINT(g_AppDebugHdl, MQTT_PAHO, "Sent the packet\r\n");
         TimerCountdown(&c->last_sent, c->keepAliveInterval); // record the fact that we have successfully sent the packet
         rc = SUCCESS;
     }
     else
+    {
+        SYS_APPDEBUG_ERR_PRINT(g_AppDebugHdl, MQTT_PAHO, "Failed. Sent bytes = %d\r\n", sent);
         rc = FAILURE;
+    }
     return rc;
 }
 
@@ -124,11 +131,13 @@ static int readPacket(MQTTClient* c, Timer* timer)
     if (rem_len > (c->readbuf_size - len))
     {
         rc = BUFFER_OVERFLOW;
+        SYS_APPDEBUG_ERR_PRINT(g_AppDebugHdl, MQTT_PAHO, "Buffer Overflow\r\n");
         goto exit;
     }
 
     /* 3. read the rest of the buffer using a callback to supply the rest of the data */
     if (rem_len > 0 && (rc = c->ipstack->mqttread(c->ipstack, c->readbuf + len, rem_len, TimerLeftMS(timer)) != rem_len)) {
+        SYS_APPDEBUG_INFO_PRINT(g_AppDebugHdl, MQTT_PAHO, "Received packet with length = %d; Expected %d\r\n", rc, rem_len);
         rc = 0;
         goto exit;
     }
@@ -136,7 +145,10 @@ static int readPacket(MQTTClient* c, Timer* timer)
     header.byte = c->readbuf[0];
     rc = header.bits.type;
     if (c->keepAliveInterval > 0)
+    {
+        SYS_APPDEBUG_INFO_PRINT(g_AppDebugHdl, MQTT_PAHO, "Received a packet\r\n");
         TimerCountdown(&c->last_received, c->keepAliveInterval); // record the fact that we have successfully received a packet
+    }
 exit:
     return rc;
 }
@@ -191,6 +203,8 @@ int deliverMessage(MQTTClient* c, MQTTString* topicName, MQTTMessage* message)
                 c->messageHandlers[i].fp(&md);
                 rc = SUCCESS;
             }
+            else
+                SYS_APPDEBUG_ERR_PRINT(g_AppDebugHdl, MQTT_PAHO, "Matched Topic %s but NULL Handler\r\n", c->messageHandlers[i].topicFilter);
         }
     }
 
@@ -213,10 +227,13 @@ int keepalive(MQTTClient* c)
     if (c->keepAliveInterval == 0)
         goto exit;
 
-    if (TimerIsExpired(&c->last_sent) || TimerIsExpired(&c->last_received))
+     if (TimerIsExpired(&c->last_sent) && TimerIsExpired(&c->last_received))
     {
         if (c->ping_outstanding)
+        {
+            SYS_APPDEBUG_ERR_PRINT(g_AppDebugHdl, MQTT_PAHO, "PINGRESP Not Rcvd Last Sent = (%d); Last Rcvd = (%d)\r\n", c->last_sent.end_time, c->last_received.end_time);
             rc = FAILURE; /* PINGRESP not received in keepalive interval */
+        }
         else
         {
             Timer timer;
@@ -224,7 +241,10 @@ int keepalive(MQTTClient* c)
             TimerCountdownMS(&timer, 1000);
             int len = MQTTSerialize_pingreq(c->buf, c->buf_size);
             if (len > 0 && (rc = sendPacket(c, len, &timer)) == SUCCESS) // send the ping packet
+            {  
+                SYS_APPDEBUG_INFO_PRINT(g_AppDebugHdl, MQTT_PAHO, "PINGREQ sent\r\n");
                 c->ping_outstanding = 1;
+            }
         }
     }
 
@@ -320,16 +340,25 @@ int cycle(MQTTClient* c, Timer* timer)
             break;
     }
 
+exit:
     if (keepalive(c) != SUCCESS) {
-        //check only keepalive FAILURE status so that previous FAILURE status can be considered as FAULT
-        rc = FAILURE;
+        if(c->isconnected != 0)
+        {
+            //check only keepalive FAILURE status so that previous FAILURE status can be considered as FAULT
+            SYS_APPDEBUG_ERR_PRINT(g_AppDebugHdl, MQTT_PAHO, "keepalive failed; Disconnecting the session\r\n");
+            rc = FAILURE;
+#ifndef MQTT_BLOCKING
+            MQTTDisconnect(c);
+#endif        
+        }
     }
 
-exit:
     if (rc == SUCCESS)
         rc = packet_type;
+#ifdef MQTT_BLOCKING
     else if (c->isconnected)
         MQTTCloseSession(c);
+#endif    
     return rc;
 }
 
@@ -412,9 +441,11 @@ int MQTTConnectWithResults(MQTTClient* c, MQTTPacket_connectData* options, MQTTC
 #if defined(MQTT_TASK)
 	  MutexLock(&c->mutex);
 #endif
-	  if (c->isconnected) /* don't send connect packet again if we are already connected */
-		  goto exit;
-
+    if (c->isconnected) /* don't send connect packet again if we are already connected */
+    {
+        SYS_APPDEBUG_ERR_PRINT(g_AppDebugHdl, MQTT_PAHO, "Already Connected\r\n");
+        goto exit;
+    }
     TimerInit(&connect_timer);
     TimerCountdownMS(&connect_timer, c->command_timeout_ms);
 
@@ -425,10 +456,16 @@ int MQTTConnectWithResults(MQTTClient* c, MQTTPacket_connectData* options, MQTTC
     c->cleansession = options->cleansession;
     TimerCountdown(&c->last_received, c->keepAliveInterval);
     if ((len = MQTTSerialize_connect(c->buf, c->buf_size, options)) <= 0)
+    {
+        SYS_APPDEBUG_ERR_PRINT(g_AppDebugHdl, MQTT_PAHO, "MQTTSerialize_connect() Failed (%d)\r\n", len);
         goto exit;
+    }
     if ((rc = sendPacket(c, len, &connect_timer)) != SUCCESS)  // send the connect packet
+    {
+        SYS_APPDEBUG_ERR_PRINT(g_AppDebugHdl, MQTT_PAHO, "sendPacket() Failed (%d)\r\n", rc);
         goto exit; // there was a problem
-
+    }
+#ifdef MQTT_BLOCKING
     // this will be a blocking call, wait for the connack
     if (waitfor(c, CONNACK, &connect_timer) == CONNACK)
     {
@@ -442,13 +479,13 @@ int MQTTConnectWithResults(MQTTClient* c, MQTTPacket_connectData* options, MQTTC
     else
         rc = FAILURE;
 
-exit:
     if (rc == SUCCESS)
     {
         c->isconnected = 1;
         c->ping_outstanding = 0;
     }
-
+#endif
+exit:
 #if defined(MQTT_TASK)
 	  MutexUnlock(&c->mutex);
 #endif
@@ -463,6 +500,50 @@ int MQTTConnect(MQTTClient* c, MQTTPacket_connectData* options)
     return MQTTConnectWithResults(c, options, &data);
 }
 
+#ifndef MQTT_BLOCKING
+int MQTTWaitForConnectWithResults(MQTTClient* c, MQTTConnackData* data)
+{
+    int rc = FAILURE;
+	
+#if defined(MQTT_TASK)
+	  MutexLock(&c->mutex);
+#endif
+
+    // this will be a blocking call, wait for the connack
+    if (waitfor(c, CONNACK, NULL) == CONNACK)
+    {
+        data->rc = 0;
+        data->sessionPresent = 0;
+
+        if (MQTTDeserialize_connack(&data->sessionPresent, &data->rc, c->readbuf, c->readbuf_size) == 1)
+            rc = data->rc;
+        else
+        {
+            SYS_APPDEBUG_ERR_PRINT(g_AppDebugHdl, MQTT_PAHO, "MQTTDeserialize_connack() failed\r\n");
+            rc = FAILURE;
+        }
+    }
+    else
+        rc = FAILURE;
+
+    if (rc == SUCCESS)
+    {
+        c->isconnected = 1;
+        c->ping_outstanding = 0;
+    }
+
+#if defined(MQTT_TASK)
+	  MutexUnlock(&c->mutex);
+#endif
+	return rc;
+}
+
+int MQTTWaitForConnect(MQTTClient* c)
+{
+    MQTTConnackData data;
+	return MQTTWaitForConnectWithResults(c, &data);
+}
+#endif
 
 int MQTTSetMessageHandler(MQTTClient* c, const char* topicFilter, messageHandler messageHandler)
 {
@@ -518,18 +599,26 @@ int MQTTSubscribeWithResults(MQTTClient* c, const char* topicFilter, enum QoS qo
 #if defined(MQTT_TASK)
 	  MutexLock(&c->mutex);
 #endif
-	  if (!c->isconnected)
-		    goto exit;
-
+    if (!c->isconnected)
+    {
+        SYS_APPDEBUG_ERR_PRINT(g_AppDebugHdl, MQTT_PAHO, "Not Connected\r\n");
+        goto exit;
+    }
     TimerInit(&timer);
     TimerCountdownMS(&timer, c->command_timeout_ms);
 
     len = MQTTSerialize_subscribe(c->buf, c->buf_size, 0, getNextPacketId(c), 1, &topic, (int*)&qos);
     if (len <= 0)
+    {
+        SYS_APPDEBUG_ERR_PRINT(g_AppDebugHdl, MQTT_PAHO, "MQTTSerialize_subscribe() failed (%d)\r\n", len);
         goto exit;
+    }
     if ((rc = sendPacket(c, len, &timer)) != SUCCESS) // send the subscribe packet
+    {
+        SYS_APPDEBUG_ERR_PRINT(g_AppDebugHdl, MQTT_PAHO, "sendPacket() failed (%d)\r\n", rc);
         goto exit;             // there was a problem
-
+    }
+#ifdef MQTT_BLOCKING
     if (waitfor(c, SUBACK, &timer) == SUBACK)      // wait for suback
     {
         int count = 0;
@@ -543,6 +632,7 @@ int MQTTSubscribeWithResults(MQTTClient* c, const char* topicFilter, enum QoS qo
     }
     else
         rc = FAILURE;
+#endif
 
 exit:
     if (rc == FAILURE)
@@ -561,6 +651,41 @@ int MQTTSubscribe(MQTTClient* c, const char* topicFilter, enum QoS qos,
     return MQTTSubscribeWithResults(c, topicFilter, qos, messageHandler, &data);
 }
 
+#ifndef MQTT_BLOCKING
+int MQTTWaitForSubscribeAckWithResults(MQTTClient* c, const char* topicFilter, messageHandler messageHandler, MQTTSubackData *data)
+{
+    int rc = FAILURE;
+	
+#if defined(MQTT_TASK)
+	  MutexLock(&c->mutex);
+#endif
+
+    if (waitfor(c, SUBACK, NULL) == SUBACK)      // wait for suback
+    {
+        int count = 0;
+        unsigned short mypacketid;
+        if (MQTTDeserialize_suback(&mypacketid, 1, &count, (int*)&data->grantedQoS, c->readbuf, c->readbuf_size) == 1)
+        {
+            if (data->grantedQoS != 0x80)
+                rc = MQTTSetMessageHandler(c, topicFilter, messageHandler);
+        }
+        else
+            SYS_APPDEBUG_ERR_PRINT(g_AppDebugHdl, MQTT_PAHO, "MQTTDeserialize_suback() failed\r\n");
+    }
+    else
+        rc = FAILURE;
+#if defined(MQTT_TASK)
+	  MutexUnlock(&c->mutex);
+#endif
+	return rc;
+}
+
+int MQTTWaitForSubscribeAck(MQTTClient* c, const char* topicFilter, messageHandler messageHandler)
+{
+    MQTTSubackData data;
+    return MQTTWaitForSubscribeAckWithResults(c, topicFilter, messageHandler, &data);
+}
+#endif
 
 int MQTTUnsubscribe(MQTTClient* c, const char* topicFilter)
 {
@@ -573,29 +698,37 @@ int MQTTUnsubscribe(MQTTClient* c, const char* topicFilter)
 #if defined(MQTT_TASK)
 	  MutexLock(&c->mutex);
 #endif
-	  if (!c->isconnected)
-		  goto exit;
-
+    if (!c->isconnected)
+    {
+        SYS_APPDEBUG_ERR_PRINT(g_AppDebugHdl, MQTT_PAHO, "Not Connected\r\n");
+        goto exit;
+    }
     TimerInit(&timer);
     TimerCountdownMS(&timer, c->command_timeout_ms);
 
     if ((len = MQTTSerialize_unsubscribe(c->buf, c->buf_size, 0, getNextPacketId(c), 1, &topic)) <= 0)
+    {
+        SYS_APPDEBUG_ERR_PRINT(g_AppDebugHdl, MQTT_PAHO, "MQTTSerialize_unsubscribe() failed (%d)\r\n", len);
         goto exit;
+    }
     if ((rc = sendPacket(c, len, &timer)) != SUCCESS) // send the subscribe packet
+    {
+        SYS_APPDEBUG_ERR_PRINT(g_AppDebugHdl, MQTT_PAHO, "sendPacket() failed (%d)\r\n", rc);
         goto exit; // there was a problem
-
+    }
+#ifdef MQTT_BLOCKING
     if (waitfor(c, UNSUBACK, &timer) == UNSUBACK)
     {
         unsigned short mypacketid;  // should be the same as the packetid above
         if (MQTTDeserialize_unsuback(&mypacketid, c->readbuf, c->readbuf_size) == 1)
         {
             /* remove the subscription message handler associated with this topic, if there is one */
-            MQTTSetMessageHandler(c, topicFilter, NULL);
+            rc = MQTTSetMessageHandler(c, topicFilter, NULL);
         }
     }
     else
         rc = FAILURE;
-
+#endif
 exit:
     if (rc == FAILURE)
         MQTTCloseSession(c);
@@ -605,6 +738,35 @@ exit:
     return rc;
 }
 
+#ifndef MQTT_BLOCKING
+int MQTTWaitForUnsubscribeAck(MQTTClient* c, const char* topicFilter)
+{
+    int rc = FAILURE;
+
+#if defined(MQTT_TASK)
+	  MutexLock(&c->mutex);
+#endif
+
+    if (waitfor(c, UNSUBACK, NULL) == UNSUBACK)
+    {
+        unsigned short mypacketid;  // should be the same as the packetid above
+        if (MQTTDeserialize_unsuback(&mypacketid, c->readbuf, c->readbuf_size) == 1)
+        {
+            /* remove the subscription message handler associated with this topic, if there is one */
+            rc = MQTTSetMessageHandler(c, topicFilter, NULL);
+        }
+        else
+            SYS_APPDEBUG_ERR_PRINT(g_AppDebugHdl, MQTT_PAHO, "MQTTDeserialize_unsuback() failed\r\n");
+    }
+    else
+        rc = FAILURE;
+
+#if defined(MQTT_TASK)
+	  MutexUnlock(&c->mutex);
+#endif
+	return rc;
+}
+#endif
 
 int MQTTPublish(MQTTClient* c, const char* topicName, MQTTMessage* message)
 {
@@ -617,8 +779,11 @@ int MQTTPublish(MQTTClient* c, const char* topicName, MQTTMessage* message)
 #if defined(MQTT_TASK)
 	  MutexLock(&c->mutex);
 #endif
-	  if (!c->isconnected)
-		    goto exit;
+    if (!c->isconnected)
+    {
+        SYS_APPDEBUG_ERR_PRINT(g_AppDebugHdl, MQTT_PAHO, "Not Connected\r\n");
+        goto exit;
+    }
 
     TimerInit(&timer);
     TimerCountdownMS(&timer, c->command_timeout_ms);
@@ -629,10 +794,16 @@ int MQTTPublish(MQTTClient* c, const char* topicName, MQTTMessage* message)
     len = MQTTSerialize_publish(c->buf, c->buf_size, 0, message->qos, message->retained, message->id,
               topic, (unsigned char*)message->payload, message->payloadlen);
     if (len <= 0)
+    {
+        SYS_APPDEBUG_ERR_PRINT(g_AppDebugHdl, MQTT_PAHO, "MQTTSerialize_publish() failed (%d)\r\n", len);
         goto exit;
+    }
     if ((rc = sendPacket(c, len, &timer)) != SUCCESS) // send the subscribe packet
+    {
+        SYS_APPDEBUG_ERR_PRINT(g_AppDebugHdl, MQTT_PAHO, "sendPacket() failed (%d)\r\n", rc);
         goto exit; // there was a problem
-
+    }
+#ifdef MQTT_BLOCKING
     if (message->qos == QOS1)
     {
         if (waitfor(c, PUBACK, &timer) == PUBACK)
@@ -657,7 +828,7 @@ int MQTTPublish(MQTTClient* c, const char* topicName, MQTTMessage* message)
         else
             rc = FAILURE;
     }
-
+#endif
 exit:
     if (rc == FAILURE)
         MQTTCloseSession(c);
@@ -667,6 +838,66 @@ exit:
     return rc;
 }
 
+#ifndef MQTT_BLOCKING
+int MQTTWaitForPublishAck(MQTTClient* c, MQTTMessage* message)
+{
+    int rc = SUCCESS;
+
+#if defined(MQTT_TASK)
+	MutexLock(&c->mutex);
+#endif
+
+    if (message->qos == QOS1)
+    {
+        if (waitfor(c, PUBACK, NULL) == PUBACK)
+        {
+            unsigned short mypacketid;
+            unsigned char dup, type;
+            if (MQTTDeserialize_ack(&type, &dup, &mypacketid, c->readbuf, c->readbuf_size) != 1)
+            {
+                SYS_APPDEBUG_ERR_PRINT(g_AppDebugHdl, MQTT_PAHO, "MQTTDeserialize_ack() failed\r\n");
+                rc = FAILURE;
+            }
+        }
+        else
+            rc = FAILURE;
+    }
+    else if (message->qos == QOS2)
+    {
+        if (waitfor(c, PUBCOMP, NULL) == PUBCOMP)
+        {
+            unsigned short mypacketid;
+            unsigned char dup, type;
+            if (MQTTDeserialize_ack(&type, &dup, &mypacketid, c->readbuf, c->readbuf_size) != 1)
+            {
+                SYS_APPDEBUG_ERR_PRINT(g_AppDebugHdl, MQTT_PAHO, "MQTTDeserialize_ack() failed\r\n");
+                rc = FAILURE;
+            }
+        }
+        else
+            rc = FAILURE;
+    }
+#if defined(MQTT_TASK)
+	  MutexUnlock(&c->mutex);
+#endif
+	return rc;
+}
+#endif
+
+int MQTTWaitForPublish(MQTTClient* c)
+{
+    int rc = FAILURE;
+
+    if (!c->isconnected)
+    	return FAILURE;
+
+    if (waitfor(c, PUBLISH, NULL) == PUBLISH)
+    {
+        rc = SUCCESS;
+    }
+
+	return rc;
+}
 
 int MQTTDisconnect(MQTTClient* c)
 {
@@ -677,12 +908,18 @@ int MQTTDisconnect(MQTTClient* c)
 #if defined(MQTT_TASK)
 	MutexLock(&c->mutex);
 #endif
+    if(c->isconnected == 0)
+        return SUCCESS;
+    
     TimerInit(&timer);
     TimerCountdownMS(&timer, c->command_timeout_ms);
 
-	  len = MQTTSerialize_disconnect(c->buf, c->buf_size);
+	len = MQTTSerialize_disconnect(c->buf, c->buf_size);
     if (len > 0)
         rc = sendPacket(c, len, &timer);            // send the disconnect packet
+
+    c->ipstack->disconnect(c->ipstack);
+
     MQTTCloseSession(c);
 
 #if defined(MQTT_TASK)
