@@ -34,8 +34,11 @@
   #define DLLExport
 #endif
 
-#include "MQTTPacket.h"
+#include "third_party/paho.mqtt.embedded-c/MQTTPacket/src/MQTTPacket.h" 
 #include "stdio.h"
+//Microchip PIC32MZ Wireless platform specific port
+#include "third_party/paho.mqtt.embedded-c/MQTTClient-C/Platforms/MCHP_pic32mzw1.h"
+
 
 #if defined(MQTTCLIENT_PLATFORM_HEADER)
 /* The following sequence of macros converts the MQTTCLIENT_PLATFORM_HEADER value
@@ -213,14 +216,11 @@ DLLExport int MQTTDisconnect(MQTTClient* client);
  */
 DLLExport int MQTTYield(MQTTClient* client, int time);
 
-/** MQTT isConnected
- *  @param client - the client object to use
- *  @return truth value indicating whether the client is connected to the server
- */
-DLLExport int MQTTIsConnected(MQTTClient* client)
-{
-  return client->isconnected;
-}
+int MQTTWaitForConnect(MQTTClient* c);
+int MQTTWaitForSubscribeAck(MQTTClient* c, const char* topicFilter, messageHandler messageHandler);
+int MQTTWaitForPublishAck(MQTTClient* c, MQTTMessage* message);
+int MQTTWaitForPublish(MQTTClient* c);
+int MQTTWaitForUnsubscribeAck(MQTTClient* c, const char* topicFilter);
 
 #if defined(MQTT_TASK)
 /** MQTT start background thread for a client.  After this, MQTTYield should not be called.
