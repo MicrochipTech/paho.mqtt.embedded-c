@@ -231,7 +231,7 @@ int keepalive(MQTTClient* c)
     {
         if (c->ping_outstanding)
         {
-            SYS_MQTTDEBUG_ERR_PRINT(g_AppDebugHdl, MQTT_PAHO, "PINGRESP Not Rcvd Last Sent = (%d); Last Rcvd = (%d)\r\n", c->last_sent.end_time, c->last_received.end_time);
+            SYS_MQTTDEBUG_ERR_PRINT(g_AppDebugHdl, MQTT_PAHO, "PINGRESP Not Rcvd Last Sent = (%lu); Last Rcvd = (%lu)\r\n", c->last_sent.end_time, c->last_received.end_time);
             rc = FAILURE; /* PINGRESP not received in keepalive interval */
         }
         else
