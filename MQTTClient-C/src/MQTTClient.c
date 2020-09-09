@@ -204,7 +204,9 @@ int deliverMessage(MQTTClient* c, MQTTString* topicName, MQTTMessage* message)
                 rc = SUCCESS;
             }
             else
+			{
                 SYS_MQTTDEBUG_ERR_PRINT(g_AppDebugHdl, MQTT_PAHO, "Matched Topic %s but NULL Handler\r\n", c->messageHandlers[i].topicFilter);
+			}
         }
     }
 
@@ -670,7 +672,9 @@ int MQTTWaitForSubscribeAckWithResults(MQTTClient* c, const char* topicFilter, m
                 rc = MQTTSetMessageHandler(c, topicFilter, messageHandler);
         }
         else
+		{
             SYS_MQTTDEBUG_ERR_PRINT(g_AppDebugHdl, MQTT_PAHO, "MQTTDeserialize_suback() failed\r\n");
+		}
     }
     else
         rc = FAILURE;
@@ -756,7 +760,9 @@ int MQTTWaitForUnsubscribeAck(MQTTClient* c, const char* topicFilter)
             rc = MQTTSetMessageHandler(c, topicFilter, NULL);
         }
         else
+		{
             SYS_MQTTDEBUG_ERR_PRINT(g_AppDebugHdl, MQTT_PAHO, "MQTTDeserialize_unsuback() failed\r\n");
+		}
     }
     else
         rc = FAILURE;
